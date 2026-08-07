@@ -152,32 +152,54 @@ func runTranscode(ctx context.Context, j *job.Job, js job.Store, st storage.Stor
 		}
 	}
 
-	if err := tc.Transcode(ctx, inputPath, outDir, transcoder.DefaultLadder, onProgress); err != nil {
+	result, err := tc.Transcode(ctx, inputPath, outDir, transcoder.DefaultLadder, onProgress)
+	if err != nil {
 		return err
 	}
-
-	entries, err := os.ReadDir(outDir)
-	if err != nil {
-		return fmt.Errorf("reading transcoded output: %w", err)
-	}
-	for _, entry := range entries {
-		if err := uploadOutput(ctx, st, j.ID, outDir, entry.Name()); err != nil {
+	//
+	// entries, err := os.ReadDir(outDir)
+	// if err != nil {
+	// 	return fmt.Errorf("reading transcoded output: %w", err)
+	// }
+	//
+	outputs := make([]job.Output, 0, len(result))
+	for _, r := range result {
+		filename := r.Name + ".mp4"
+		size, err := uploadOutput(ctx, st, j.ID, outDir, filename)
+		if err != nil {
 			return err
 		}
+
+		outputs = append(outputs, job.Output{
+			Name:      r.Name,
+			Width:     r.Width,
+			Height:    r.Height,
+			SizeBytes: size,
+		})
 	}
+
+	j.Outputs = outputs
+
 	return nil
 }
 
-func uploadOutput(ctx context.Context, st storage.Storage, jobID, outDir, filename string) error {
-	f, err := os.Open(filepath.Join(outDir, filename))
+func uploadOutput(ctx context.Context, st storage.Storage, jobID, outDir, filename string) (int64, error) {
+	filepath := filepath.Join(outDir, filename)
+
+	info, err := os.Stat(filepath)
 	if err != nil {
-		return fmt.Errorf("opening output %s: %w", filename, err)
+		return 0, fmt.Errorf("statting output %s: %w", filename, err)
+	}
+
+	f, err := os.Open(filepath)
+	if err != nil {
+		return 0, fmt.Errorf("opening output %s: %w", filename, err)
 	}
 	defer f.Close()
 
 	key := fmt.Sprintf("processed/%s/%s", jobID, filename)
 	if err := st.Put(ctx, key, f); err != nil {
-		return fmt.Errorf("uploading output %s: %w", filename, err)
+		return 0, fmt.Errorf("uploading output %s: %w", filename, err)
 	}
-	return nil
+	return info.Size(), nil
 }

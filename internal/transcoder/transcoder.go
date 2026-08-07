@@ -121,6 +121,16 @@ func planRenditions(src SourceInfo, ladder []Rendition) []Rendition {
 	return picked
 }
 
+// RenditionResult describes one file Transcode actually produced —
+// its real dimensions, as measured from the output file itself rather
+// than recomputed in Go, since ffmpeg's -2 auto-dimension rounding means
+// the true output isn't always the exact number you'd expect by hand.
+type RenditionResult struct {
+	Name   string
+	Width  int
+	Height int
+}
+
 func scaleFilter(landscape bool, shortEdge int) string {
 	if landscape {
 		return fmt.Sprintf("-2:%d", shortEdge) // pin height, auto width
@@ -136,10 +146,10 @@ func scaleFilter(landscape bool, shortEdge int) string {
 // to stdout as it works (instead of the human progress bar, which goes to
 // stderr and is annoying to parse reliably). We read those lines live,
 // while ffmpeg is still running, and translate them into percentages.
-func (f *FFmpeg) Transcode(ctx context.Context, inputPath, outDir string, ladder []Rendition, onProgress func(percent int)) error {
+func (f *FFmpeg) Transcode(ctx context.Context, inputPath, outDir string, ladder []Rendition, onProgress func(percent int)) ([]RenditionResult, error) {
 	src, err := f.Probe(ctx, inputPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	landscape := src.Width >= src.Height
 	toRender := planRenditions(src, ladder)
@@ -167,13 +177,13 @@ func (f *FFmpeg) Transcode(ctx context.Context, inputPath, outDir string, ladder
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("transcoder: attaching stdout: %w", err)
+		return nil, fmt.Errorf("transcoder: attaching stdout: %w", err)
 	}
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf // ffmpeg's real error output, kept only for the error message if it fails
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("transcoder: starting ffmpeg: %w", err)
+		return nil, fmt.Errorf("transcoder: starting ffmpeg: %w", err)
 	}
 
 	// Read progress lines until ffmpeg closes stdout (i.e. until it
@@ -200,9 +210,22 @@ func (f *FFmpeg) Transcode(ctx context.Context, inputPath, outDir string, ladder
 	}
 
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("transcoder: ffmpeg failed: %w (stderr: %s)", err, stderrBuf.String())
+		return nil, fmt.Errorf("transcoder: ffmpeg failed: %w (stderr: %s)", err, stderrBuf.String())
+	}
+	onProgress(100)
+
+	// ffmpeg succeeded — probe each file it actually wrote to report its
+	// REAL dimensions back to the caller, rather than trusting our own
+	// scale-filter math to have predicted them exactly.
+	results := make([]RenditionResult, 0, len(toRender))
+	for _, r := range toRender {
+		outPath := fmt.Sprintf("%s/%s.mp4", outDir, r.Name)
+		info, err := f.Probe(ctx, outPath)
+		if err != nil {
+			return nil, fmt.Errorf("transcoder: probing output %s: %w", r.Name, err)
+		}
+		results = append(results, RenditionResult{Name: r.Name, Width: info.Width, Height: info.Height})
 	}
 
-	onProgress(100)
-	return nil
+	return results, nil
 }

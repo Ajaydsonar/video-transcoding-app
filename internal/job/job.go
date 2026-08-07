@@ -31,7 +31,7 @@ type Job struct {
 	Status    Status
 	Progress  int      // 0-100, updated by the worker in a later step
 	RawKey    string   // storage key of the uploaded original
-	Outputs   []Output `json:"omitempty"`
+	Outputs   []Output `json:"outputs,omitempty"`
 	Error     string   `json:",omitempty"`
 	CreatedAt time.Time
 	UpdatedAt time.Time

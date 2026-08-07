@@ -12,4 +12,5 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /videos", s.handleUpload)
 	s.mux.HandleFunc("GET /videos/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /videos/{id}/events", s.handleJobEvents)
+	s.mux.HandleFunc("GET /videos/{id}/file/{name}", s.handleDownload)
 }
