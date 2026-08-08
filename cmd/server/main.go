@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -48,7 +49,7 @@ func main() {
 	// instead of R2 + Postgres. Swapping later means changing these two
 	// lines, nothing else.
 
-	st, err := storage.NewLocal("./data/videos")
+	st, err := newStorage(ctx, cfg)
 	if err != nil {
 		slog.Error("failed to init storage", "error", err)
 		os.Exit(1)
@@ -82,4 +83,28 @@ func main() {
 	wg.Wait()
 
 	slog.Info("shutdown complete")
+}
+
+// newStorage picks the Storage implementation based on config, so the
+// same binary runs against local disk in dev and B2 in production with
+// no code changes — just an env var flip.
+func newStorage(ctx context.Context, cfg *config.Config) (storage.Storage, error) {
+	switch cfg.StorageBackend {
+	case "b2":
+		slog.Info("Using B2 Storage")
+
+		return storage.NewB2(ctx, storage.B2Config{
+			Endpoint:       cfg.B2Endpoint,
+			Region:         cfg.B2Region,
+			Bucket:         cfg.B2Bucket,
+			KeyID:          cfg.B2KeyID,
+			ApplicationKey: cfg.B2AppKey,
+		})
+	case "local":
+		slog.Info("Using local Storage")
+
+		return storage.NewLocal("./data/videos")
+	default:
+		return nil, fmt.Errorf("unknown STORAGE_BACKEND %q (want \"local\" or \"b2\")", cfg.StorageBackend)
+	}
 }
