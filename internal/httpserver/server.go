@@ -8,33 +8,41 @@ import (
 	"net/http"
 	"time"
 
-	"video-pipeline/internal/config"
 	"video-pipeline/internal/events"
+
+	"video-pipeline/internal/config"
 	"video-pipeline/internal/job"
 	"video-pipeline/internal/queue"
 	"video-pipeline/internal/storage"
+	"video-pipeline/internal/transcoder"
 )
 
 // Server wraps the standard library's http.Server. We keep our own mux on
 // the struct (rather than using http.DefaultServeMux) so routes are
 // explicit and testable, and so nothing else in the process can quietly
 // register a handler we don't know about.
+//
+// storage and jobs are declared as INTERFACES, not concrete types (*Local,
+// *MemoryStore). Handlers never know whether they're talking to disk or
+// R2, memory or Postgres — that's the whole point of the abstraction.
 type Server struct {
 	cfg     *config.Config
 	mux     *http.ServeMux
 	storage storage.Storage
 	jobs    job.Store
 	q       queue.Queue
+	tc      *transcoder.FFmpeg
 	b       *events.Broker
 }
 
-func New(cfg *config.Config, st storage.Storage, jobs job.Store, q queue.Queue, b *events.Broker) *Server {
+func New(cfg *config.Config, st storage.Storage, jobs job.Store, q queue.Queue, tc *transcoder.FFmpeg, b *events.Broker) *Server {
 	s := &Server{
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
 		storage: st,
 		jobs:    jobs,
 		q:       q,
+		tc:      tc,
 		b:       b,
 	}
 	s.routes()
@@ -49,8 +57,8 @@ func (s *Server) Run(ctx context.Context) error {
 	httpSrv := &http.Server{
 		Addr:         ":" + s.cfg.Port,
 		Handler:      s.mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
 

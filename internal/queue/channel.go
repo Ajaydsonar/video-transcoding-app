@@ -35,4 +35,8 @@ func (c *Channel) Dequeue(ctx context.Context) (string, error) {
 	}
 }
 
+func (c *Channel) Len() int {
+	return len(c.ch) // safe to call concurrently — len() on a channel is a lock-free, O(1) read
+}
+
 var _ Queue = (*Channel)(nil)

@@ -15,10 +15,7 @@ const (
 	StatusFailed     Status = "failed"
 )
 
-// Job tracks one video through the whole pipeline: upload -> transcode ->
-// ready. It's the single source of truth the API reads from to answer
-// "what's the status of my video?"
-
+// Output describes one transcoded rendition that's ready to be downloaded.
 type Output struct {
 	Name      string `json:"name"`
 	Width     int    `json:"width"`
@@ -26,13 +23,16 @@ type Output struct {
 	SizeBytes int64  `json:"sizeBytes"`
 }
 
+// Job tracks one video through the whole pipeline: upload -> transcode ->
+// ready. It's the single source of truth the API reads from to answer
+// "what's the status of my video?"
 type Job struct {
-	ID        string
-	Status    Status
-	Progress  int      // 0-100, updated by the worker in a later step
-	RawKey    string   // storage key of the uploaded original
-	Outputs   []Output `json:"outputs,omitempty"`
-	Error     string   `json:",omitempty"`
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        string    `json:"id"`
+	Status    Status    `json:"status"`
+	Progress  int       `json:"progress"` // 0-100, updated by the worker in a later step
+	RawKey    string    `json:"rawKey"`   // storage key of the uploaded original
+	Outputs   []Output  `json:"outputs,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }

@@ -21,4 +21,10 @@ type Storage interface {
 
 	// Get returns a reader for the given key. Caller must Close it.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+
+	// Delete removes the object at key. Implementations should treat
+	// deleting an already-missing key as success, not an error — the
+	// caller's goal ("this key shouldn't exist") is already satisfied.
+	Delete(ctx context.Context, key string) error
+
 }

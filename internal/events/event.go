@@ -31,9 +31,24 @@ func (b *Broker) Subscribe(jobID string) (chan Update, func()) {
 
 	b.subscribers[jobID] = append(b.subscribers[jobID], c)
 
+	var once sync.Once
 	unsubscribe := func() {
-		delete(b.subscribers, jobID)
-		close(c)
+		once.Do(func() {
+			b.mu.Lock()
+			subs := b.subscribers[jobID]
+			for i, s := range subs {
+				if s == c {
+					// remove this one; keep the rest
+					b.subscribers[jobID] = append(subs[:i], subs[i+1:]...)
+					if len(b.subscribers[jobID]) == 0 {
+						delete(b.subscribers, jobID)
+					}
+					break
+				}
+			}
+			b.mu.Unlock()
+			close(c)
+		})
 	}
 
 	return c, unsubscribe

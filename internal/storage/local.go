@@ -51,6 +51,13 @@ func (l *Local) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return f, nil
 }
 
+func (l *Local) Delete(ctx context.Context, key string) error {
+	if err := os.Remove(filepath.Join(l.baseDir, key)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("storage: deleting %s: %w", key, err)
+	}
+	return nil
+}
+
 // This line does nothing at runtime — it's a compile-time check. If Local
 // ever stops satisfying the Storage interface (e.g. someone renames Put),
 // this line fails to compile with a clear error, right here, instead of

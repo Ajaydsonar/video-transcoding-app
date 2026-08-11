@@ -22,4 +22,5 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.4 // indirect
 	github.com/aws/smithy-go v1.27.6 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
+	golang.org/x/time v0.15.0 // indirect
 )

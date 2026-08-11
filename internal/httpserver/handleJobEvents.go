@@ -64,7 +64,10 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
-		case update := <-ch:
+		case update, ok := <-ch:
+			if !ok {
+				return
+			}
 			send(update)
 			if update.Status == string(job.StatusCompleted) || update.Status == string(job.StatusFailed) {
 				return

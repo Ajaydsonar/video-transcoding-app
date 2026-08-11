@@ -67,4 +67,15 @@ func (b *B2) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	return out.Body, nil
 }
 
+func (b *B2) Delete(ctx context.Context, key string) error {
+	_, err := b.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("storage: b2 delete %s: %w", key, err)
+	}
+	return nil
+}
+
 var _ Storage = (*B2)(nil)
