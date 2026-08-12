@@ -1,7 +1,12 @@
 // Package events
 package events
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
+
+var ErrSubscribed = errors.New("events: job already has an active listener")
 
 type Update struct {
 	JobID    string `json:"jobId"`
@@ -9,61 +14,61 @@ type Update struct {
 	Progress int    `json:"progress"`
 }
 
+// Broker fans out job progress to ONE listener per job. A second Subscribe
+// attempt for the same job is rejected so a video's progress is only ever
+// streamed to a single client.
 type Broker struct {
 	mu          sync.Mutex
-	subscribers map[string][]chan Update // jonId -> jobs listner
+	subscribers map[string]chan Update // jobId -> the single active listener
 }
 
 func NewBroker() *Broker {
 	return &Broker{
-		subscribers: make(map[string][]chan Update),
+		subscribers: make(map[string]chan Update),
 	}
 }
 
-// Subscribe registers a new channel for jobID. Returns the channel to read
-// from, and an unsubscribe func the caller MUST defer-call, or you leak a
-// channel (and a slot in the map slice) forever.
-func (b *Broker) Subscribe(jobID string) (chan Update, func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
+// Subscribe registers one listener for jobID. Returns ErrSubscribed if a
+// listener is already active. You MUST call the returned func (defer it),
+// or the job's slot stays locked forever.
+func (b *Broker) Subscribe(jobID string) (chan Update, func(), error) {
 	c := make(chan Update, 4)
 
-	b.subscribers[jobID] = append(b.subscribers[jobID], c)
+	b.mu.Lock()
+	if _, ok := b.subscribers[jobID]; ok {
+		b.mu.Unlock()
+		return nil, nil, ErrSubscribed
+	}
+	b.subscribers[jobID] = c
+	b.mu.Unlock()
 
 	var once sync.Once
 	unsubscribe := func() {
 		once.Do(func() {
 			b.mu.Lock()
-			subs := b.subscribers[jobID]
-			for i, s := range subs {
-				if s == c {
-					// remove this one; keep the rest
-					b.subscribers[jobID] = append(subs[:i], subs[i+1:]...)
-					if len(b.subscribers[jobID]) == 0 {
-						delete(b.subscribers, jobID)
-					}
-					break
-				}
+			if b.subscribers[jobID] == c {
+				delete(b.subscribers, jobID)
 			}
 			b.mu.Unlock()
 			close(c)
 		})
 	}
 
-	return c, unsubscribe
+	return c, unsubscribe, nil
 }
 
 func (b *Broker) Publish(update Update) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	ch, ok := b.subscribers[update.JobID]
+	b.mu.Unlock()
+	if !ok {
+		return
+	}
 
-	for _, ch := range b.subscribers[update.JobID] {
-		select {
-		case ch <- update:
-			//
-		default:
-
-		}
+	select {
+	case ch <- update:
+	default:
+		// Listener is slow and its buffer is full: drop this tick.
+		// Terminal events are recovered by the SSE handler's self-heal.
 	}
 }

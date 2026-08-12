@@ -31,7 +31,12 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 	// and subscribe after, a publish landing in that gap is lost forever.
 	// Subscribing first means any such publish is already waiting in your
 	// buffered channel by the time you get to the loop below.
-	ch, unsubscribe := s.b.Subscribe(id)
+	ch, unsubscribe, err := s.b.Subscribe(id)
+	if err != nil {
+		writeError(w, http.StatusConflict, err) // 409: someone is already streaming this job
+		return
+	}
+
 	defer unsubscribe()
 
 	current, err := s.jobs.Get(r.Context(), id)
@@ -62,18 +67,37 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	isTerminal := func(st job.Status) bool {
+		return st == job.StatusCompleted || st == job.StatusFailed
+	}
+
 	for {
 		select {
 		case update, ok := <-ch:
 			if !ok {
-				return
+				return // broker closed our channel
 			}
 			send(update)
-			if update.Status == string(job.StatusCompleted) || update.Status == string(job.StatusFailed) {
+			if isTerminal(job.Status(update.Status)) {
+				return
+			}
+			// Self-heal: the terminal event could be dropped from the
+			// buffered channel. Re-check the store; if it's terminal now,
+			// emit the truth and stop instead of hanging forever.
+			if st, err := s.jobs.Get(r.Context(), id); err == nil && isTerminal(st.Status) {
+				send(events.Update{JobID: st.ID, Status: string(st.Status), Progress: st.Progress})
+				return
+			}
+		case <-time.After(15 * time.Second):
+			// Heartbeat: even if every event was dropped and the channel
+			// stays quiet, re-check the store so a finished job never
+			// leaves the client hanging.
+			if st, err := s.jobs.Get(r.Context(), id); err == nil && isTerminal(st.Status) {
+				send(events.Update{JobID: st.ID, Status: string(st.Status), Progress: st.Progress})
 				return
 			}
 		case <-r.Context().Done():
-			return // client disconnected — same pattern as your worker shutdown
+			return // client disconnected
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -35,6 +36,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if s.q.Len() >= maxQueueDepth {
 		w.Header().Set("Retry-After", "30")
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("server is at capacity, try again shortly"))
+		return
+	}
+
+	// Disable the server-level WriteTimeout for this long-lived SSE connection.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		slog.Error("failed to disable SSE write deadline", "error", err)
 		return
 	}
 
@@ -121,7 +129,21 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.q.Enqueue(r.Context(), j.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("enque job record: %w", err))
+		// Enqueue fails most often because the client disconnected, which
+		// means r.Context() is already cancelled — never reuse it for
+		// cleanup. Use a fresh background context with a timeout instead.
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		j.Status = job.StatusFailed
+		if uErr := s.jobs.Update(cleanCtx, j); uErr != nil {
+			slog.Error("failed to mark job failed after enqueue error", "job_id", j.ID, "error", uErr)
+		}
+		if dErr := s.storage.Delete(cleanCtx, j.RawKey); dErr != nil {
+			slog.Error("failed to delete raw file after enqueue error", "job_id", j.ID, "error", dErr)
+		}
+
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("enqueueing job: %w", err))
 		return
 	}
 

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"video-pipeline/internal/job"
 )
@@ -19,10 +21,17 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, job.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
 			return
-
 		}
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("loading job: %w", err))
+		return
 	}
 
+	// Large video downloads easily outlive the server's 15s WriteTimeout,
+	// so disable the write deadline for this response.
+	rc := http.NewResponseController(w)
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		slog.Warn("failed to disable download write deadline", "error", err)
+	}
 	// SECURITY: never build the storage key directly from the URL param.
 	// `name` came straight from the client — validate it against this
 	// job's ACTUAL Outputs first. Otherwise a crafted request could probe

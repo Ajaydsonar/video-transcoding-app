@@ -26,5 +26,4 @@ type Storage interface {
 	// deleting an already-missing key as success, not an error — the
 	// caller's goal ("this key shouldn't exist") is already satisfied.
 	Delete(ctx context.Context, key string) error
-
 }
