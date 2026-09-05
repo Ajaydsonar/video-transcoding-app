@@ -65,57 +65,334 @@ func runWorker(ctx context.Context, wg *sync.WaitGroup, q queue.Queue, js job.St
 // recorded on the Job, not a reason to crash the worker goroutine. If
 // this worker died on every bad video, one malformed upload would
 // permanently shrink your pool by one.
-func processJob(ctx context.Context, id string, js job.Store, st storage.Storage, tc *transcoder.FFmpeg, b *events.Broker, jobTimeout time.Duration) {
+func processJob(
+	ctx context.Context,
+	id string,
+	js job.Store,
+	st storage.Storage,
+	tc *transcoder.FFmpeg,
+	b *events.Broker,
+	jobTimeout time.Duration,
+) {
 	j, err := js.Get(ctx, id)
 	if err != nil {
-		slog.Error("worker: could not load job", "job_id", id, "error", err)
+		slog.Error(
+			"worker: could not load job",
+			"job_id", id,
+			"error", err,
+		)
 		return
 	}
 
 	j.Status = job.StatusProcessing
+	j.Progress = 0
 	j.UpdatedAt = time.Now().UTC()
+
 	if err := js.Update(ctx, &j); err != nil {
-		slog.Error("worker: failed to mark job processing", "job_id", id, "error", err)
+		slog.Error(
+			"worker: failed to mark job processing",
+			"job_id", id,
+			"error", err,
+		)
 		return
 	}
 
-	b.Publish(events.Update{JobID: j.ID, Status: string(job.StatusProcessing), Progress: 0})
-	// A bounded context per job — NOT the pool's lifetime ctx directly.
-	// If ffmpeg (or anything else in runTranscode) hangs, this fires and
-	// exec.CommandContext kills the subprocess, freeing this worker
-	// instead of losing it to a single bad file forever.
+	b.Publish(events.Update{
+		JobID:    j.ID,
+		Status:   string(job.StatusProcessing),
+		Progress: 0,
+	})
+
+	// Each job gets its own timeout.
 	jobCtx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
 
-	if err := runTranscode(jobCtx, &j, js, st, tc, b); err != nil {
-		slog.Error("worker: transcode failed", "job_id", id, "error", err)
+	var transcodeErr error
+
+	switch j.Kind {
+	case job.KindMP4:
+		transcodeErr = runTranscode(
+			jobCtx,
+			&j,
+			js,
+			st,
+			tc,
+			b,
+		)
+
+	case job.KindHLS:
+		transcodeErr = runTranscodeHLS(
+			jobCtx,
+			&j,
+			js,
+			st,
+			tc,
+			b,
+		)
+
+	default:
+		transcodeErr = fmt.Errorf(
+			"unsupported job kind %q",
+			j.Kind,
+		)
+	}
+
+	// One and ONLY one place handles failure.
+	if transcodeErr != nil {
+		slog.Error(
+			"worker: transcode failed",
+			"job_id", id,
+			"kind", j.Kind,
+			"error", transcodeErr,
+		)
 
 		j.Status = job.StatusFailed
-		j.Error = err.Error()
+		j.Error = transcodeErr.Error()
 		j.UpdatedAt = time.Now().UTC()
+
 		if err := js.Update(ctx, &j); err != nil {
-			slog.Error("worker: failed to mark job failed", "job_id", id, "error", err)
+			slog.Error(
+				"worker: failed to mark job failed",
+				"job_id", id,
+				"error", err,
+			)
 			return
 		}
 
-		b.Publish(events.Update{JobID: j.ID, Status: string(job.StatusFailed)})
+		b.Publish(events.Update{
+			JobID:    j.ID,
+			Status:   string(job.StatusFailed),
+			Progress: j.Progress,
+		})
 
 		return
 	}
 
-	// Mark job as completed
-	// j.Progress = 100
+	// Both MP4 and HLS functions return successfully only when
+	// their complete output has been uploaded.
 	j.Status = job.StatusCompleted
+	j.Progress = 100
 	j.UpdatedAt = time.Now().UTC()
 
 	if err := js.Update(ctx, &j); err != nil {
-		slog.Error("worker: failed to mark job completed", "job_id", id, "error", err)
+		slog.Error(
+			"worker: failed to mark job completed",
+			"job_id", id,
+			"error", err,
+		)
 		return
 	}
 
-	b.Publish(events.Update{JobID: j.ID, Status: string(job.StatusCompleted), Progress: 100})
+	b.Publish(events.Update{
+		JobID:    j.ID,
+		Status:   string(job.StatusCompleted),
+		Progress: 100,
+	})
 
-	slog.Info("worker: job completed", "job_id", id)
+	slog.Info(
+		"worker: job completed",
+		"job_id", id,
+		"kind", j.Kind,
+	)
+}
+
+func runTranscodeHLS(
+	ctx context.Context,
+	j *job.Job,
+	js job.Store,
+	st storage.Storage,
+	tc *transcoder.FFmpeg,
+	b *events.Broker,
+) error {
+	tmpDir, err := os.MkdirTemp("", "hls-job-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// ------------------------------------------------------------
+	// 1. Download raw input
+	// ------------------------------------------------------------
+
+	raw, err := st.Get(ctx, j.RawKey)
+	if err != nil {
+		return fmt.Errorf("fetching raw upload: %w", err)
+	}
+
+	inputPath := filepath.Join(tmpDir, "input")
+
+	inFile, err := os.Create(inputPath)
+	if err != nil {
+		raw.Close()
+		return fmt.Errorf("creating local input file: %w", err)
+	}
+
+	_, copyErr := io.Copy(inFile, raw)
+
+	raw.Close()
+
+	if err := inFile.Close(); err != nil && copyErr == nil {
+		copyErr = err
+	}
+
+	if copyErr != nil {
+		return fmt.Errorf("copying raw upload locally: %w", copyErr)
+	}
+
+	// ------------------------------------------------------------
+	// 2. Create HLS output directory
+	// ------------------------------------------------------------
+
+	outDir := filepath.Join(tmpDir, "hls")
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("creating HLS output dir: %w", err)
+	}
+
+	// ------------------------------------------------------------
+	// 3. Progress callback
+	// ------------------------------------------------------------
+
+	onProgress := func(percent int) {
+		j.Progress = percent
+		j.UpdatedAt = time.Now().UTC()
+
+		if err := js.Update(ctx, j); err != nil {
+			slog.Warn(
+				"worker: HLS progress update failed",
+				"job_id", j.ID,
+				"error", err,
+			)
+		}
+
+		b.Publish(events.Update{
+			JobID:    j.ID,
+			Status:   string(job.StatusProcessing),
+			Progress: percent,
+		})
+	}
+
+	// ------------------------------------------------------------
+	// 4. Run FFmpeg
+	// ------------------------------------------------------------
+
+	results, err := tc.TranscodeHLS(
+		ctx,
+		inputPath,
+		outDir,
+		transcoder.DefaultLadder,
+		onProgress,
+	)
+	if err != nil {
+		return fmt.Errorf("HLS transcode: %w", err)
+	}
+
+	// ------------------------------------------------------------
+	// 5. Upload HLS directory
+	// ------------------------------------------------------------
+
+	prefix := fmt.Sprintf(
+		"processed/%s/hls",
+		j.ID,
+	)
+
+	if err := uploadHLSDirectory(
+		ctx,
+		st,
+		outDir,
+		prefix,
+	); err != nil {
+		return fmt.Errorf("uploading HLS output: %w", err)
+	}
+
+	// ------------------------------------------------------------
+	// 6. Save master playlist key
+	// ------------------------------------------------------------
+
+	j.MasterKey = fmt.Sprintf(
+		"processed/%s/hls/master.m3u8",
+		j.ID,
+	)
+
+	// ------------------------------------------------------------
+	// 7. Save HLS rendition metadata
+	// ------------------------------------------------------------
+
+	j.Outputs = make([]job.Output, 0, len(results))
+
+	for _, r := range results {
+		j.Outputs = append(j.Outputs, job.Output{
+			Name:      r.Name,
+			Width:     r.Width,
+			Height:    r.Height,
+			Bandwidth: r.Bandwidth,
+			SizeBytes: r.Bytes,
+		})
+	}
+
+	return nil
+}
+
+func uploadHLSDirectory(
+	ctx context.Context,
+	st storage.Storage,
+	localDir string,
+	storagePrefix string,
+) error {
+	return filepath.Walk(
+		localDir,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			rel, err := filepath.Rel(localDir, path)
+			if err != nil {
+				return fmt.Errorf(
+					"calculating relative path: %w",
+					err,
+				)
+			}
+
+			key := filepath.ToSlash(
+				filepath.Join(storagePrefix, rel),
+			)
+
+			f, err := os.Open(path)
+			if err != nil {
+				return fmt.Errorf(
+					"opening HLS file %s: %w",
+					path,
+					err,
+				)
+			}
+
+			err = st.Put(ctx, key, f)
+			closeErr := f.Close()
+
+			if err != nil {
+				return fmt.Errorf(
+					"uploading HLS file %s: %w",
+					key,
+					err,
+				)
+			}
+
+			if closeErr != nil {
+				return fmt.Errorf(
+					"closing HLS file %s: %w",
+					path,
+					closeErr,
+				)
+			}
+
+			return nil
+		},
+	)
 }
 
 // runTranscode does the actual work: pull the raw upload down to a local
@@ -141,7 +418,9 @@ func runTranscode(ctx context.Context, j *job.Job, js job.Store, st storage.Stor
 	}
 	_, copyErr := io.Copy(inFile, raw)
 	raw.Close()
-	inFile.Close()
+	if err := inFile.Close(); err != nil && copyErr == nil {
+		copyErr = err
+	}
 	if copyErr != nil {
 		return fmt.Errorf("copying raw upload locally: %w", copyErr)
 	}
@@ -154,7 +433,6 @@ func runTranscode(ctx context.Context, j *job.Job, js job.Store, st storage.Stor
 	// This closure is what turns ffmpeg's raw percentage stream into a
 	// visible, pollable job status: every tick, persist it.
 	onProgress := func(percent int) {
-
 		j.Progress = percent
 		j.UpdatedAt = time.Now().UTC()
 		if err := js.Update(ctx, j); err != nil {

@@ -26,6 +26,13 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This endpoint only serves MP4 renditions. HLS jobs are packaged
+	// as playlist + segment trees — fetch those from /videos/{id}/hls/.
+	if j.Kind != job.KindMP4 {
+		writeError(w, http.StatusNotFound, fmt.Errorf("job %s has no mp4 renditions (kind %q), use /videos/%s/hls/ instead", id, j.Kind, id))
+		return
+	}
+
 	// Large video downloads easily outlive the server's 15s WriteTimeout,
 	// so disable the write deadline for this response.
 	rc := http.NewResponseController(w)

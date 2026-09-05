@@ -12,6 +12,57 @@ import (
 	"video-pipeline/internal/storage"
 )
 
+// RunStaleUploads blocks, deleting abandoned direct-upload sessions
+// (status "uploading" older than ttl) every interval, until ctx is
+// cancelled. These are clients that fetched a presigned URL but never
+// called complete — their partial (or never-started) raw objects must
+// not accumulate in storage, and their job records must not linger.
+// Terminal-state cleanup stays in Run above; the two sweeps are
+// independent and share nothing but the stores.
+func RunStaleUploads(ctx context.Context, js job.Store, st storage.Storage, interval, ttl time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := SweepStaleUploads(ctx, js, st, ttl); err != nil {
+				slog.Error("retention: stale upload sweep failed", "error", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// SweepStaleUploads deletes one batch of abandoned upload sessions.
+// Exported so it can be exercised directly in tests without waiting
+// for a ticker.
+func SweepStaleUploads(ctx context.Context, js job.Store, st storage.Storage, ttl time.Duration) error {
+	stale, err := js.ListStaleUploads(ctx, time.Now().UTC().Add(-ttl))
+	if err != nil {
+		return fmt.Errorf("listing stale uploads: %w", err)
+	}
+
+	for _, j := range stale {
+		// Object first, record last — same crash-safety shape as sweep:
+		// a failure leaves the record behind so the next sweep retries
+		// instead of orphaning the bytes.
+		if j.RawKey != "" {
+			if err := st.Delete(ctx, j.RawKey); err != nil {
+				slog.Error("retention: deleting stale raw file failed, will retry next sweep", "job_id", j.ID, "error", err)
+				continue
+			}
+		}
+		if err := js.Delete(ctx, j.ID); err != nil {
+			slog.Error("retention: deleting stale upload record failed", "job_id", j.ID, "error", err)
+			continue
+		}
+		slog.Info("retention: deleted stale upload", "job_id", j.ID, "age", time.Since(j.CreatedAt))
+	}
+	return nil
+}
+
 // Run blocks, deleting jobs (and their files) older than ttl every
 // interval, until ctx is cancelled. Same shutdown shape as everything
 // else in this codebase — call it in its own goroutine from main, tracked
@@ -61,6 +112,17 @@ func deleteJobFiles(ctx context.Context, st storage.Storage, j job.Job) error {
 		if err := st.Delete(ctx, j.RawKey); err != nil {
 			return fmt.Errorf("deleting raw file: %w", err)
 		}
+	}
+	// HLS jobs package into a whole playlist + segment tree under
+	// processed/<id>/hls/ — the per-file loop below only knows .mp4
+	// keys, so without this the entire tree would be orphaned in
+	// storage on every cleanup.
+	if j.Kind == job.KindHLS || j.MasterKey != "" {
+		prefix := fmt.Sprintf("processed/%s/hls/", j.ID)
+		if err := st.DeletePrefix(ctx, prefix); err != nil {
+			return fmt.Errorf("deleting HLS tree: %w", err)
+		}
+		return nil
 	}
 	for _, out := range j.Outputs {
 		key := fmt.Sprintf("processed/%s/%s.mp4", j.ID, out.Name)

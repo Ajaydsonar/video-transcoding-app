@@ -22,8 +22,11 @@ func (s *Server) routes() {
 	statusLimiter := newIPLimiter(rate.Limit(5), 20)             // 5 req/s sustained, bursts of 20
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
-	s.mux.HandleFunc("POST /videos", rateLimit(uploadLimiter, s.handleUpload))
+	s.mux.HandleFunc("POST /videos", rateLimit(uploadLimiter, s.handleCreateUpload))
+	s.mux.HandleFunc("GET /videos", rateLimit(statusLimiter, s.handleListVideos))
+	s.mux.HandleFunc("POST /videos/{id}/complete", rateLimit(uploadLimiter, s.handleCompleteUpload))
 	s.mux.HandleFunc("GET /videos/{id}/events", s.handleJobEvents)
 	s.mux.HandleFunc("GET /videos/{id}/file/{name}", s.handleDownload)
+	s.mux.HandleFunc("GET /videos/{id}/hls/", s.handleHLSFile)
 	s.mux.HandleFunc("GET /videos/{id}", rateLimit(statusLimiter, s.handleGetJob))
 }

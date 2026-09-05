@@ -47,7 +47,7 @@ func main() {
 	pool := worker.NewPool(q, jobstore, st, tc, broker, 3, 15*time.Minute)
 	var wg sync.WaitGroup
 
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		pool.Start(ctx)
@@ -56,6 +56,11 @@ func main() {
 	go func() {
 		defer wg.Done()
 		retention.Run(ctx, jobstore, st, 1*time.Hour, 48*time.Hour)
+	}()
+
+	go func() {
+		defer wg.Done()
+		retention.RunStaleUploads(ctx, jobstore, st, 10*time.Minute, 1*time.Hour)
 	}()
 
 	srv := httpserver.New(cfg, st, jobstore, q, tc, broker)

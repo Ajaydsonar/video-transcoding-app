@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -28,6 +29,16 @@ type Store interface {
 	// age — deleting an active job's files out from under a running
 	// worker would be far worse than a slow cleanup.
 	ListOlderThan(ctx context.Context, cutoff time.Time) ([]Job, error)
+	// ListStaleUploads returns non-terminal, never-validated upload
+	// sessions (status "uploading") created before cutoff — clients that
+	// fetched a presigned URL but never finished (or never called
+	// complete). The caller deletes their partial objects and records.
+	ListStaleUploads(ctx context.Context, cutoff time.Time) ([]Job, error)
+	// ListRecent returns the newest jobs first, capped at limit (callers
+	// should clamp limit to something sane like 50). Used for the
+	// "recent uploads" listing — no status filter here, the handler
+	// decides what to show.
+	ListRecent(ctx context.Context, limit int) ([]Job, error)
 }
 
 // MemoryStore holds jobs in a plain map. Multiple goroutines will hit this
@@ -88,6 +99,34 @@ func (s *MemoryStore) ListOlderThan(ctx context.Context, cutoff time.Time) ([]Jo
 		if terminal && j.CreatedAt.Before(cutoff) {
 			result = append(result, *j)
 		}
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) ListStaleUploads(ctx context.Context, cutoff time.Time) ([]Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []Job
+	for _, j := range s.jobs {
+		if j.Status == StatusUploading && j.CreatedAt.Before(cutoff) {
+			result = append(result, *j)
+		}
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) ListRecent(ctx context.Context, limit int) ([]Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		result = append(result, *j)
+	}
+	sort.Slice(result, func(a, b int) bool {
+		return result[a].CreatedAt.After(result[b].CreatedAt)
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
 	}
 	return result, nil
 }
