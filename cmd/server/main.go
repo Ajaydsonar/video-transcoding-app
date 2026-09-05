@@ -40,11 +40,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	jobstore := job.NewMemoryStore()
+	jobstore, closeStore, err := newJobStore(cfg)
+	if err != nil {
+		slog.Error("failed to init job store", "error", err)
+		os.Exit(1)
+	}
+	defer closeStore()
+
 	q := queue.NewChannel(100)
 	tc := transcoder.New()
 	broker := events.NewBroker()
-	pool := worker.NewPool(q, jobstore, st, tc, broker, 3, 15*time.Minute)
+	pool := worker.NewPool(q, jobstore, st, tc, broker, cfg.Workers, time.Duration(cfg.JobTimeoutMin)*time.Minute)
 	var wg sync.WaitGroup
 
 	wg.Add(3)
@@ -64,6 +70,15 @@ func main() {
 	}()
 
 	srv := httpserver.New(cfg, st, jobstore, q, tc, broker)
+
+	// Re-drive jobs left non-terminal by a previous crash/restart
+	// before accepting traffic. Enqueue only buffers into the channel,
+	// so this is safe with workers already running.
+	if err := srv.RecoverInterruptedJobs(ctx); err != nil {
+		slog.Error("job recovery failed", "error", err)
+		os.Exit(1)
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		slog.Error("server exited with error", "error", err)
 		os.Exit(1)
@@ -71,6 +86,28 @@ func main() {
 	wg.Wait()
 
 	slog.Info("shutdown complete")
+}
+
+// newJobStore picks the job record backend. SQLite is the default:
+// records survive crashes (and power recovery); "memory" keeps the old
+// ephemeral behavior for throwaway local runs.
+func newJobStore(cfg *config.Config) (job.Store, func(), error) {
+	switch cfg.JobStore {
+	case "sqlite":
+		s, err := job.OpenSQLite(cfg.DBPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		return s, func() {
+			if err := s.Close(); err != nil {
+				slog.Error("failed to close job store", "error", err)
+			}
+		}, nil
+	case "memory":
+		return job.NewMemoryStore(), func() {}, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown JOB_STORE %q (want \"sqlite\" or \"memory\")", cfg.JobStore)
+	}
 }
 
 // newStorage picks the Storage implementation based on config, so the

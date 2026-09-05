@@ -1,0 +1,11 @@
+# Secrets must never bake into the image — Render injects them as env.
+.env
+.env.local
+# Local runtime state (DB, downloads) — the deploy gets a fresh disk.
+data/
+*.db
+*.db-shm
+*.db-wal
+# VCS and editor noise.
+.git/
+.vscode/

@@ -28,6 +28,7 @@ import (
 type Server struct {
 	cfg     *config.Config
 	mux     *http.ServeMux
+	handler http.Handler
 	storage storage.Storage
 	jobs    job.Store
 	q       queue.Queue
@@ -46,6 +47,7 @@ func New(cfg *config.Config, st storage.Storage, jobs job.Store, q queue.Queue, 
 		b:       b,
 	}
 	s.routes()
+	s.handler = withCORS(s.mux, cfg.FrontendOrigins)
 	return s
 }
 
@@ -56,7 +58,7 @@ func New(cfg *config.Config, st storage.Storage, jobs job.Store, q queue.Queue, 
 func (s *Server) Run(ctx context.Context) error {
 	httpSrv := &http.Server{
 		Addr:         ":" + s.cfg.Port,
-		Handler:      s.mux,
+		Handler:      s.handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,

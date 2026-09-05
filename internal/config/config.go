@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -25,6 +27,23 @@ type Config struct {
 	B2Bucket       string
 	B2KeyID        string
 	B2AppKey       string
+
+	// JobStore selects the job record backend: "sqlite" (default,
+	// durable — records survive crashes, see internal/job/sqlite.go)
+	// or "memory" (ephemeral, nothing survives a restart).
+	JobStore string
+	// DBPath is the SQLite file, used only when JobStore == "sqlite".
+	DBPath string
+
+	// FrontendOrigins allowlists browser origins for CORS (the hosted
+	// frontend lives on a different domain than this API). Comma
+	// separated; local vite dev is included by default.
+	FrontendOrigins []string
+	// Workers is the transcode pool size. Shared hosting CPUs are weak
+	// — 1-2 keeps the box responsive; beefier machines can raise it.
+	Workers int
+	// JobTimeoutMin bounds one transcode job (slow hosts need more).
+	JobTimeoutMin int
 }
 
 // Load reads config from environment variables, falling back to sane
@@ -46,10 +65,33 @@ func Load() (*Config, error) {
 		B2Bucket:       getEnv("B2_BUCKET", ""),
 		B2KeyID:        getEnv("B2_KEY_ID", ""),
 		B2AppKey:       getEnv("B2_APPLICATION_KEY", ""),
+
+		JobStore: getEnv("JOB_STORE", "sqlite"),
+		DBPath:   getEnv("DB_PATH", "./data/jobs.db"),
+
+		FrontendOrigins: splitOrigins(getEnv("FRONTEND_ORIGIN", "http://localhost:5173")),
+		Workers:         getEnvInt("WORKERS", 3),
+		JobTimeoutMin:   getEnvInt("JOB_TIMEOUT_MIN", 15),
 	}
 
 	if cfg.Port == "" {
 		return nil, fmt.Errorf("config: PORT must not be empty")
+	}
+
+	if cfg.Workers < 1 {
+		return nil, fmt.Errorf("config: WORKERS must be >= 1, got %d", cfg.Workers)
+	}
+	if cfg.JobTimeoutMin < 1 {
+		return nil, fmt.Errorf("config: JOB_TIMEOUT_MIN must be >= 1, got %d", cfg.JobTimeoutMin)
+	}
+
+	switch cfg.JobStore {
+	case "sqlite", "memory":
+	default:
+		return nil, fmt.Errorf("config: JOB_STORE must be \"sqlite\" or \"memory\", got %q", cfg.JobStore)
+	}
+	if cfg.JobStore == "sqlite" && cfg.DBPath == "" {
+		return nil, fmt.Errorf("config: DB_PATH must not be empty when JOB_STORE=sqlite")
 	}
 
 	// Fail fast at startup, not on the first upload — a missing B2
@@ -79,4 +121,27 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		log.Printf("warning: invalid %s=%q, using %d", key, v, fallback)
+		return fallback
+	}
+	return n
+}
+
+func splitOrigins(s string) []string {
+	var out []string
+	for _, o := range strings.Split(s, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	return out
 }

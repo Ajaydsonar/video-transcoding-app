@@ -253,16 +253,36 @@ func runTranscodeHLS(
 	// 3. Progress callback
 	// ------------------------------------------------------------
 
-	onProgress := func(percent int) {
-		j.Progress = percent
-		j.UpdatedAt = time.Now().UTC()
+	// Last band flushed to the store, starting at band 0 (the initial
+	// "processing, 0%" mark already persisted it). Bands, not ticks —
+	// see inside the closure.
+	lastPersisted := 0
 
-		if err := js.Update(ctx, j); err != nil {
-			slog.Warn(
-				"worker: HLS progress update failed",
-				"job_id", j.ID,
-				"error", err,
-			)
+	onProgress := func(percent int) {
+		if percent < 0 {
+			percent = 0
+		}
+		if percent > 100 {
+			percent = 100
+		}
+		j.Progress = percent
+
+		// Durable milestones, volatile ticks: every percentage still
+		// streams to live listeners via the broker, but the store only
+		// sees 10% bands (and 100). With a disk-backed store, persisting
+		// every single tick would turn one transcode into hundreds of
+		// pointless writes; a crash loses at most one band of progress.
+		if percent == 100 || percent/10 != lastPersisted/10 {
+			lastPersisted = percent
+			j.UpdatedAt = time.Now().UTC()
+
+			if err := js.Update(ctx, j); err != nil {
+				slog.Warn(
+					"worker: HLS progress update failed",
+					"job_id", j.ID,
+					"error", err,
+				)
+			}
 		}
 
 		b.Publish(events.Update{
@@ -430,13 +450,28 @@ func runTranscode(ctx context.Context, j *job.Job, js job.Store, st storage.Stor
 		return fmt.Errorf("creating output dir: %w", err)
 	}
 
-	// This closure is what turns ffmpeg's raw percentage stream into a
-	// visible, pollable job status: every tick, persist it.
+	// This closure turns ffmpeg's raw percentage stream into visible
+	// progress: every tick still streams to live listeners via the
+	// broker, but the store only sees 10% bands (and 100) — same
+	// milestone rule as the HLS path, so a disk-backed store isn't
+	// hammered with a write per tick. Starts at band 0, already
+	// persisted by the initial "processing" mark.
+	lastPersisted := 0
+
 	onProgress := func(percent int) {
+		if percent < 0 {
+			percent = 0
+		}
+		if percent > 100 {
+			percent = 100
+		}
 		j.Progress = percent
-		j.UpdatedAt = time.Now().UTC()
-		if err := js.Update(ctx, j); err != nil {
-			slog.Warn("worker: progress update failed", "job_id", j.ID, "error", err)
+		if percent == 100 || percent/10 != lastPersisted/10 {
+			lastPersisted = percent
+			j.UpdatedAt = time.Now().UTC()
+			if err := js.Update(ctx, j); err != nil {
+				slog.Warn("worker: progress update failed", "job_id", j.ID, "error", err)
+			}
 		}
 
 		b.Publish(events.Update{JobID: j.ID, Progress: percent, Status: string(job.StatusProcessing)})
