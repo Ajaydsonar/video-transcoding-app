@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,7 +45,18 @@ CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs (created_at DESC);
 // OpenSQLite opens (creating parent dirs and the file as needed) a
 // SQLite-backed Store. dsn is a filename; WAL/busy_timeout pragmas are
 // applied via query parameters so callers pass a plain path.
+//
+// SQLite auto-creates the FILE on first write, but never parent
+// directories — and sql.Open itself does zero I/O (lazy), so a missing
+// dir only surfaces later as a cryptic SQLITE_CANTOPEN ("unable to open
+// database file") at the first Exec. Hence the MkdirAll up front: the
+// store guarantees its own directory, the same way storage.Local does.
 func OpenSQLite(dbPath string) (*SQLiteStore, error) {
+	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("job: creating db dir %s: %w", dir, err)
+		}
+	}
 	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
