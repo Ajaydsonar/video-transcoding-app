@@ -12,6 +12,11 @@ import (
 // use errors.Is instead of string-matching provider messages.
 var ErrNotFound = errors.New("storage: not found")
 
+// ErrPresignUnsupported reports a backend that can't hand out direct
+// upload URLs (disk storage has nothing to presign). Endpoints map it
+// to 501, not 500 — it's a configuration state, not a failure.
+var ErrPresignUnsupported = errors.New("storage: presigned uploads unsupported")
+
 // Storage abstracts "put a blob somewhere, get it back later." Handlers
 // and workers only ever talk to this interface — swapping Local for R2
 // later (production) means writing ONE new file that satisfies this

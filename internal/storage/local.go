@@ -71,7 +71,7 @@ func (l *Local) DeletePrefix(ctx context.Context, prefix string) error {
 // endpoints must refuse direct upload with 501 when Local is wired up,
 // not pretend it worked.
 func (l *Local) PresignPut(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	return "", fmt.Errorf("storage: local backend does not support presigned uploads")
+	return "", fmt.Errorf("storage: local backend: %w", ErrPresignUnsupported)
 }
 
 func (l *Local) Stat(ctx context.Context, key string) (int64, error) {

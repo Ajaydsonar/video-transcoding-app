@@ -128,6 +128,10 @@ func (s *Server) handleCreateUpload(w http.ResponseWriter, r *http.Request) {
 		if dErr := s.jobs.Delete(r.Context(), id); dErr != nil {
 			slog.Error("failed to roll back upload session", "job_id", id, "error", dErr)
 		}
+		if errors.Is(err, storage.ErrPresignUnsupported) {
+			writeError(w, http.StatusNotImplemented, fmt.Errorf("direct upload needs an object-storage backend (set STORAGE_BACKEND=b2)"))
+			return
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("issuing upload URL: %w", err))
 		return
 	}
