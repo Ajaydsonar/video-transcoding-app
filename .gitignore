@@ -1,2 +1,6 @@
 .env
 .env.local
+
+data/jobs.db
+data/jobs.db-shm
+data/jobs.db-wal
